@@ -1,0 +1,76 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================
+    // PLAYERS COLLECTION
+    // - Players can READ their own document
+    // - Players can CREATE their initial document with exact starting values
+    //   (validated by validInitialPlayerDoc)
+    // - Players CANNOT update or delete their document. All mutations
+    //   go through the resolveMatch / reviveStarter Cloud Functions
+    //   which use the Admin SDK to bypass these rules.
+    // ============================================================
+    match /players/{playerId} {
+      allow read: if request.auth != null && request.auth.uid == playerId;
+      allow create: if request.auth != null
+                      && request.auth.uid == playerId
+                      && validInitialPlayerDoc(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // ============================================================
+    // BATTLE_IDEMPOTENCY_KEYS — Cloud Function only
+    // ============================================================
+    match /battle_idempotency_keys/{keyId} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // BATTLE_STATS — Cloud Function only (anti-cheat tracking)
+    // ============================================================
+    match /battle_stats/{playerId} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // CHEAT_FLAGS — Cloud Function only (admin review queue)
+    // ============================================================
+    match /cheat_flags/{playerId} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // AI_POOLS — Reserved for future shared-pool migration.
+    // Currently unused. Auth read allowed so a future client UI
+    // could display global pool state, but no writes from clients.
+    // ============================================================
+    match /ai_pools/{poolId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Default deny everything else
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ============================================================
+    // HELPER: validates new player document on create.
+    // All starting balances must be exact, rank must be 0.
+    // Defined INSIDE the service block so it's callable from match rules.
+    // ============================================================
+    function validInitialPlayerDoc(data) {
+      return data.playerId == request.auth.uid
+        && data.rageblazeCoins == 50000
+        && data.tsunamiCoins == 50000
+        && data.healspikeCoins == 50000
+        && data.aiRageblazeCoins == 10000000
+        && data.aiTsunamiCoins == 10000000
+        && data.aiHealspikeCoins == 10000000
+        && data.totalWon == 0
+        && data.rank == 0;
+    }
+  }
+}

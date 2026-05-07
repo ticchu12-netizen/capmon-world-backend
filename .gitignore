@@ -1,0 +1,29 @@
+# Unity — keep all of this OUT
+Assets/
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/
+Packages/
+ProjectSettings/
+MemoryCaptures/
+*.csproj
+*.sln
+*.user
+*.userprefs
+*.unitypackage
+*.meta
+
+# Firebase
+functions/node_modules/
+functions/.firebase/
+functions/*.log
+.firebase/
+
+# OS
+.DS_Store
+Thumbs.db
+Builds/
