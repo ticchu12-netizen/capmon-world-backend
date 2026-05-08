@@ -12,6 +12,9 @@
  *   - resolveMatch: applies tier multiplier on wins (1.0×/1.4×/1.9×/2.8×) using
  *     the stakedTier mirrored by linkWallet. AI pool draws scale by multiplier
  *     so bounded-pool invariant from handoff §2.4 stays intact.
+ *   - getCapbotData: read-only endpoint for the Unity Capbot tab. Returns
+ *     stake state + recent autonomous-battle activity + recent on-chain
+ *     Pattern 2 brain-upgrade tx signatures.
  *
  * Architecture (from handoff §2):
  *   - Firestore is single source of truth for Cap Coins
@@ -494,6 +497,87 @@ exports.linkWallet = onCall({
         stakedTier: bestTier,
         stakedBrainSteps: bestBrainSteps,
         stakedAssetId: bestAssetId,
+    };
+});
+
+
+// ============================================================
+// getCapbotData — read-only data for the Unity Capbot tab UI
+// ============================================================
+// Returns:
+//   - Player stake state mirrored from on-chain (tier, brainSteps, assetId, wallet)
+//   - Last 20 autonomous battles run by the Capbot server (capbot_activity)
+//   - Last 10 on-chain Pattern 2 brain-upgrade tx signatures (brain_upgrades)
+//
+// Both subqueries require composite indexes (uid asc + timestamp desc). Firestore
+// will print a clickable index-create link in the function logs the first time
+// each query runs — click both to provision them. ~30s to build then ready.
+//
+// No writes, no transactions, no idempotency — pure read fan-out, safe to call
+// frequently (e.g. on tab open + Refresh button).
+exports.getCapbotData = onCall({
+    enforceAppCheck: false,
+    cors: ALLOWED_ORIGINS,
+}, async (request) => {
+
+    if (!request.auth) {
+        throw new HttpsError("unauthenticated", "Must be signed in.");
+    }
+    const uid = request.auth.uid;
+
+    // ---------- 1. PLAYER STAKE STATE ----------
+    const playerSnap = await db.collection("players").doc(uid).get();
+    if (!playerSnap.exists) {
+        throw new HttpsError("not-found", "Player not found.");
+    }
+    const player = playerSnap.data();
+
+    // ---------- 2. RECENT AUTONOMOUS BATTLES ----------
+    // Most recent first. capbot-server writes these in runBattleForPlayer().
+    const battlesSnap = await db.collection("capbot_activity")
+        .where("uid", "==", uid)
+        .orderBy("timestamp", "desc")
+        .limit(20)
+        .get();
+
+    // ---------- 3. RECENT ON-CHAIN BRAIN UPGRADES ----------
+    // Most recent first. capbot-server writes these in upgradeBrainOnChain()
+    // after a successful Ed25519-verified upgrade_brain_v2 tx.
+    const upgradesSnap = await db.collection("brain_upgrades")
+        .where("uid", "==", uid)
+        .orderBy("timestamp", "desc")
+        .limit(10)
+        .get();
+
+    // ---------- 4. SHAPE RESPONSE FOR UNITY (JsonUtility-compatible) ----------
+    // Field names match CapbotData / CapbotBattleEntry / BrainUpgradeEntry
+    // [Serializable] classes in FirebaseManager.cs. Don't rename fields here
+    // without updating the C# side (silent JsonUtility default failure).
+    return {
+        stakedTier: player.stakedTier ?? -1,
+        stakedBrainSteps: player.stakedBrainSteps ?? 0,
+        stakedAssetId: player.stakedAssetId ?? null,
+        walletAddress: player.solanaWalletAddress ?? null,
+        recentBattles: battlesSnap.docs.map(d => {
+            const x = d.data();
+            return {
+                timestamp: x.timestamp,
+                capbotType: x.capbotType,
+                defeatedAi: x.defeatedAi,
+                payout: x.payout,
+                multiplier: x.multiplier,
+                playerWon: x.playerWon,
+            };
+        }),
+        recentUpgrades: upgradesSnap.docs.map(d => {
+            const x = d.data();
+            return {
+                timestamp: x.timestamp,
+                oldBrainSteps: x.oldBrainSteps,
+                newBrainSteps: x.newBrainSteps,
+                txSignature: x.txSignature,
+            };
+        }),
     };
 });
 
