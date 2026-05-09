@@ -32,6 +32,7 @@
  */
 
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onRequest } = require('firebase-functions/v2/https');
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const { initializeApp } = require("firebase-admin/app");
@@ -326,6 +327,164 @@ exports.resolveMatch = onCall({
     return result.cachedResult;
 });
 
+exports.getDashboardStats = onRequest(
+    { region: 'us-central1', maxInstances: 5 },
+    async (req, res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+        try {
+            const admin = require('firebase-admin');
+            if (!admin.apps.length) admin.initializeApp();
+            const db = admin.firestore();
+
+            // Active capbots + tier distribution + leaderboard + total Cap Coins
+            const playersSnap = await db.collection('players')
+                .where('stakedTier', '>=', 0).get();
+            const tierDist = [0, 0, 0, 0];
+            const leaderboard = [];
+            let totalCapCoinsDistributed = 0;
+            playersSnap.docs.forEach(d => {
+                const p = d.data();
+                if (typeof p.stakedTier === 'number' && p.stakedTier >= 0 && p.stakedTier <= 3) {
+                    tierDist[p.stakedTier]++;
+                }
+                totalCapCoinsDistributed += (p.totalWon || 0);
+                leaderboard.push({
+                    wallet: p.solanaWalletAddress || p.playerId,
+                    displayName: p.displayName || '',
+                    tier: p.stakedTier,
+                    brainSteps: p.stakedBrainSteps || 0,
+                    totalWon: p.totalWon || 0,
+                });
+            });
+            leaderboard.sort((a, b) => b.totalWon - a.totalWon);
+
+            // Brain upgrades aggregate
+            const upgradesSnap = await db.collection('brain_upgrades')
+                .orderBy('timestamp', 'desc').limit(500).get();
+            let totalBrainStepsAttested = 0;
+            upgradesSnap.docs.forEach(d => {
+                const u = d.data();
+                totalBrainStepsAttested += ((u.newBrainSteps || 0) - (u.oldBrainSteps || 0));
+            });
+
+            // Capbot activity (battles)
+            const dayAgo = Date.now() - 24 * 3600 * 1000;
+            const activitySnap = await db.collection('capbot_activity')
+                .where('timestamp', '>=', dayAgo).limit(2000).get();
+            const battlesToday = activitySnap.size;
+
+            res.json({
+                stats: {
+                    activeCapbots: playersSnap.size,
+                    totalUpgrades: upgradesSnap.size,
+                    totalBrainStepsAttested,
+                    totalCapCoinsDistributed,
+                    battlesToday,
+                },
+                tierDist,
+                leaderboard: leaderboard.slice(0, 10),
+            });
+        } catch (err) {
+            console.error('[getDashboardStats]', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
+
+exports.getBattleReplay = onRequest(
+    { region: 'us-central1', maxInstances: 5 },
+    async (req, res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+        try {
+            const battleId = req.query.id;
+            if (!battleId) {
+                res.status(400).json({ error: 'missing id query param' });
+                return;
+            }
+            const admin = require('firebase-admin');
+            if (!admin.apps.length) admin.initializeApp();
+            const db = admin.firestore();
+            const snap = await db.collection('battle_replays').doc(battleId).get();
+            if (!snap.exists) {
+                res.status(404).json({ error: 'replay not found' });
+                return;
+            }
+            res.json(snap.data());
+        } catch (err) {
+            console.error('[getBattleReplay]', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
+
+exports.getRecentBattles = onRequest(
+    { region: 'us-central1', maxInstances: 5 },
+    async (req, res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+        try {
+            const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+            const admin = require('firebase-admin');
+            if (!admin.apps.length) admin.initializeApp();
+            const db = admin.firestore();
+            const snap = await db.collection('battle_replays')
+                .orderBy('timestamp', 'desc').limit(limit).get();
+            const battles = snap.docs.map(d => {
+                const data = d.data();
+                return {
+                    battleId: data.battleId,
+                    walletAddress: data.walletAddress,
+                    capbotName: data.capbotName,
+                    capbotTier: data.capbotTier,
+                    opponentName: data.opponentName,
+                    result: data.result,
+                    capCoinDelta: data.capCoinDelta,
+                    multiplier: data.multiplier,
+                    timestamp: data.timestamp,
+                    turnCount: (data.turns || []).length,
+                };
+            });
+            res.json({ battles, count: battles.length });
+        } catch (err) {
+            console.error('[getRecentBattles]', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
+
+exports.getBrainUpgradeProofs = onRequest(
+    { cors: true, region: 'us-central1', maxInstances: 5 },
+    async (req, res) => {
+        try {
+            const admin = require('firebase-admin');
+            if (!admin.apps.length) admin.initializeApp();
+            const db = admin.firestore();
+
+            const snap = await db.collection('brain_upgrades')
+                .orderBy('timestamp', 'desc')
+                .limit(500)
+                .get();
+            const upgrades = snap.docs.map(d => d.data());
+            const totalStepsMinted = upgrades.reduce(
+                (sum, u) => sum + ((u.newBrainSteps || 0) - (u.oldBrainSteps || 0)),
+                0
+            );
+            res.json({
+                upgrades,
+                totalCount: upgrades.length,
+                totalStepsMinted,
+            });
+        } catch (err) {
+            console.error('[getBrainUpgradeProofs]', err);
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
 
 // ============================================================
 // reviveStarter — restore a dead starter from another's coins (§5.3)
@@ -500,6 +659,152 @@ exports.linkWallet = onCall({
     };
 });
 
+// ============================================================
+// signInWithWallet — wallet-only auth path for hackathon judges
+// ============================================================
+// Verify a Phantom-signed challenge, mint a Firebase custom token with
+// UID = wallet pubkey, create or refresh the player doc, and return the
+// custom token. Client then calls signInWithCustomToken(auth, token) and
+// the existing loadPlayerData path takes over.
+//
+// This is parallel to (NOT replacing) the X auth flow. Existing X-signed-in
+// players are unaffected. A wallet that signs in here gets its own player
+// doc — separate balances from any X-linked account that happens to share
+// the same wallet. Acceptable hackathon limitation.
+//
+// Flow:
+//   1. Verify Ed25519 signature on the challenge message
+//   2. Anti-replay (timestamp <= 5 min old) + anti-context (message must
+//      contain the walletAddress to prevent sig reuse)
+//   3. Query Solana for stake_records owned by the wallet
+//   4. Create or update players/<walletPubkey> doc with stake state mirrored
+//   5. Mint Firebase custom token with UID = wallet pubkey
+//   6. Return { customToken, walletAddress, stakedTier, stakedBrainSteps,
+//               stakedAssetId, isNewPlayer }
+exports.signInWithWallet = onCall({
+    enforceAppCheck: false,
+    cors: ALLOWED_ORIGINS,
+}, async (request) => {
+
+    const { walletAddress, message, signature, timestamp } = request.data || {};
+    if (!walletAddress || !message || !signature || !timestamp) {
+        throw new HttpsError("invalid-argument", "Missing required fields.");
+    }
+
+    // ---------- 1. SIGNATURE VERIFICATION ----------
+    let pubkeyBytes;
+    try {
+        pubkeyBytes = new PublicKey(walletAddress).toBytes();
+    } catch (e) {
+        throw new HttpsError("invalid-argument", "Invalid wallet address.");
+    }
+
+    const messageBytes = new TextEncoder().encode(message);
+    const signatureBytes = Uint8Array.from(signature);
+    const isValid = nacl.sign.detached.verify(messageBytes, signatureBytes, pubkeyBytes);
+    if (!isValid) {
+        console.warn(`[signInWithWallet] Sig verify failed for wallet=${walletAddress.slice(0,8)}...`);
+        throw new HttpsError("permission-denied", "Signature verification failed.");
+    }
+
+    // ---------- 2. ANTI-REPLAY + ANTI-CONTEXT ----------
+    const ageMs = Date.now() - Number(timestamp);
+    if (ageMs > CONFIG.LINK_WALLET_MAX_MESSAGE_AGE_MS || ageMs < -60000) {
+        throw new HttpsError("failed-precondition", "Message timestamp out of range.");
+    }
+    if (!message.includes(`Wallet: ${walletAddress}`)) {
+        throw new HttpsError("permission-denied", "Message wallet mismatch.");
+    }
+
+    // ---------- 3. QUERY ON-CHAIN STAKE RECORDS ----------
+    // Same memcmp logic as linkWallet — extracts highest-tier stake for this wallet.
+    const connection = new Connection(HELIUS_RPC, "confirmed");
+    let accounts;
+    try {
+        accounts = await connection.getProgramAccounts(STAKING_PROGRAM_ID, {
+            filters: [
+                { dataSize: STAKE_RECORD_SIZE },
+                { memcmp: { offset: STAKE_OWNER_OFFSET, bytes: walletAddress } },
+            ],
+        });
+    } catch (e) {
+        console.error("[signInWithWallet] RPC error:", e);
+        throw new HttpsError("unavailable", "Solana RPC error.");
+    }
+
+    let bestTier = -1;
+    let bestBrainSteps = 0;
+    let bestAssetId = null;
+    for (const acct of accounts) {
+        const data = acct.account.data;
+        if (data.length < STAKE_RECORD_SIZE) continue;
+        const tier = data[STAKE_TIER_OFFSET];
+        const brainSteps = data.readUInt32LE(STAKE_BRAIN_STEPS_OFFSET);
+        const assetId = new PublicKey(data.slice(STAKE_ASSET_OFFSET, STAKE_ASSET_OFFSET + 32)).toBase58();
+        if (tier > bestTier) {
+            bestTier = tier;
+            bestBrainSteps = brainSteps;
+            bestAssetId = assetId;
+        }
+    }
+
+    // ---------- 4. CREATE OR REFRESH PLAYER DOC ----------
+    // Admin SDK bypasses Firestore rules — we can write the wallet-derived
+    // initial doc with stake fields populated from the start.
+    const playerRef = db.collection("players").doc(walletAddress);
+    const snap = await playerRef.get();
+    const isNewPlayer = !snap.exists;
+
+    if (isNewPlayer) {
+        await playerRef.set({
+            playerId: walletAddress,
+            displayName: `Wallet ${walletAddress.slice(0, 4)}..${walletAddress.slice(-4)}`,
+            isGuest: false,
+            currentStarter: 'Rageblaze',
+            rageblazeCoins: 50000,
+            tsunamiCoins: 50000,
+            healspikeCoins: 50000,
+            aiRageblazeCoins: 10000000,
+            aiTsunamiCoins: 10000000,
+            aiHealspikeCoins: 10000000,
+            totalWon: 0,
+            rank: 0,
+            createdAt: Date.now(),
+            solanaWalletAddress: walletAddress,
+            stakedTier: bestTier,
+            stakedBrainSteps: bestBrainSteps,
+            stakedAssetId: bestAssetId,
+            walletLinkedAt: Date.now(),
+            authMethod: 'wallet',  // tag for analytics — distinguishes from 'twitter' path
+        });
+    } else {
+        // Returning wallet — refresh stake state but don't touch balances.
+        await playerRef.update({
+            solanaWalletAddress: walletAddress,
+            stakedTier: bestTier,
+            stakedBrainSteps: bestBrainSteps,
+            stakedAssetId: bestAssetId,
+            walletLinkedAt: Date.now(),
+        });
+    }
+
+    // ---------- 5. MINT FIREBASE CUSTOM TOKEN ----------
+    // UID = wallet pubkey directly. Base58 is ASCII-safe and well under
+    // Firebase's 128-char UID limit.
+    const { getAuth } = require('firebase-admin/auth');
+    const customToken = await getAuth().createCustomToken(walletAddress);
+
+    console.log(`[signInWithWallet] ${isNewPlayer ? 'NEW' : 'returning'} wallet=${walletAddress.slice(0,8)}... tier=${bestTier} steps=${bestBrainSteps}`);
+
+    return {
+        customToken,
+        walletAddress,
+        stakedTier: bestTier,
+        stakedBrainSteps: bestBrainSteps,
+        stakedAssetId: bestAssetId,
+        isNewPlayer,
+    };
+});
 
 // ============================================================
 // getCapbotData — read-only data for the Unity Capbot tab UI
