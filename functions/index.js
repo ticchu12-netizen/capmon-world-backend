@@ -364,9 +364,11 @@ exports.getDashboardStats = onRequest(
             const upgradesSnap = await db.collection('brain_upgrades')
                 .orderBy('timestamp', 'desc').limit(500).get();
             let totalBrainStepsAttested = 0;
+            let totalCoinsBurned = 0;
             upgradesSnap.docs.forEach(d => {
                 const u = d.data();
                 totalBrainStepsAttested += ((u.newBrainSteps || 0) - (u.oldBrainSteps || 0));
+                totalCoinsBurned += (u.coinsBurned || 0);
             });
 
             // Capbot activity (battles)
@@ -380,6 +382,7 @@ exports.getDashboardStats = onRequest(
                     activeCapbots: playersSnap.size,
                     totalUpgrades: upgradesSnap.size,
                     totalBrainStepsAttested,
+                    totalCoinsBurned,
                     totalCapCoinsDistributed,
                     battlesToday,
                 },
@@ -401,19 +404,18 @@ exports.getBattleReplay = onRequest(
         if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
         try {
             const battleId = req.query.id;
-            if (!battleId) {
-                res.status(400).json({ error: 'missing id query param' });
-                return;
-            }
+            if (!battleId) { res.status(400).json({ error: 'missing id query param' }); return; }
             const admin = require('firebase-admin');
             if (!admin.apps.length) admin.initializeApp();
             const db = admin.firestore();
             const snap = await db.collection('battle_replays').doc(battleId).get();
-            if (!snap.exists) {
-                res.status(404).json({ error: 'replay not found' });
-                return;
-            }
-            res.json(snap.data());
+            if (!snap.exists) { res.status(404).json({ error: 'replay not found' }); return; }
+            const replay = snap.data();
+            // Attach matching brain upgrade (proof-of-burn beat in outcome panel)
+            const upgradeSnap = await db.collection('brain_upgrades')
+                .where('battleId', '==', battleId).limit(1).get();
+            if (!upgradeSnap.empty) replay.brainUpgrade = upgradeSnap.docs[0].data();
+            res.json(replay);
         } catch (err) {
             console.error('[getBattleReplay]', err);
             res.status(500).json({ error: err.message });
@@ -458,27 +460,24 @@ exports.getRecentBattles = onRequest(
 );
 
 exports.getBrainUpgradeProofs = onRequest(
-    { cors: true, region: 'us-central1', maxInstances: 5 },
+    { region: 'us-central1', maxInstances: 5 },
     async (req, res) => {
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.set('Access-Control-Allow-Headers', 'Content-Type');
+        if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
         try {
             const admin = require('firebase-admin');
             if (!admin.apps.length) admin.initializeApp();
             const db = admin.firestore();
-
             const snap = await db.collection('brain_upgrades')
-                .orderBy('timestamp', 'desc')
-                .limit(500)
-                .get();
+                .orderBy('timestamp', 'desc').limit(500).get();
             const upgrades = snap.docs.map(d => d.data());
             const totalStepsMinted = upgrades.reduce(
-                (sum, u) => sum + ((u.newBrainSteps || 0) - (u.oldBrainSteps || 0)),
-                0
-            );
-            res.json({
-                upgrades,
-                totalCount: upgrades.length,
-                totalStepsMinted,
-            });
+                (sum, u) => sum + ((u.newBrainSteps || 0) - (u.oldBrainSteps || 0)), 0);
+            const totalCoinsBurned = upgrades.reduce(
+                (sum, u) => sum + (u.coinsBurned || 0), 0);
+            res.json({ upgrades, totalCount: upgrades.length, totalStepsMinted, totalCoinsBurned });
         } catch (err) {
             console.error('[getBrainUpgradeProofs]', err);
             res.status(500).json({ error: err.message });
