@@ -1,5 +1,11 @@
 # Unity — keep all of this OUT
-Assets/
+Assets/*
+!Assets/*.cs
+!Assets/Plugins/
+Assets/Plugins/*
+!Assets/Plugins/WebGL/
+Assets/Plugins/WebGL/*
+!Assets/Plugins/WebGL/*.jslib
 Library/
 Temp/
 Obj/

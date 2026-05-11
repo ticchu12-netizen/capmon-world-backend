@@ -866,6 +866,7 @@ exports.getCapbotData = onCall({
             const x = d.data();
             return {
                 timestamp: x.timestamp,
+                battleId: x.battleId,
                 capbotType: x.capbotType,
                 defeatedAi: x.defeatedAi,
                 payout: x.payout,
@@ -877,6 +878,7 @@ exports.getCapbotData = onCall({
             const x = d.data();
             return {
                 timestamp: x.timestamp,
+                battleId: x.battleId,
                 oldBrainSteps: x.oldBrainSteps,
                 newBrainSteps: x.newBrainSteps,
                 txSignature: x.txSignature,
