@@ -16,6 +16,7 @@ public class StarterSelectionScreen : MonoBehaviour
     public Button rageblazeButton;
     public Button tsunamiButton;
     public Button healspikeButton;
+    public Button backButton;          // NEW: back to wallet (Phantom) or login (X/guest)
 
     [Header("UI - Name + Coins under each preview")]
     public TMP_Text rageblazeNameText;
@@ -27,29 +28,31 @@ public class StarterSelectionScreen : MonoBehaviour
 
     [Header("UI")]
     public TMP_Text rankText;
-    public Button closeButton;   // Optional
+    public Button closeButton;
 
     [Header("Tier badge (NFT-staked players only)")]
-    public TMP_Text tierBadgeText;   // e.g. "King · 60M brain · 2.8×"
+    public TMP_Text tierBadgeText;
 
     [Header("Canvas")]
-    public Canvas starterCanvas;   // Drag this screen's Canvas here (Screen Space - Camera)
-    
+    public Canvas starterCanvas;
+
     [Header("Capbot tab")]
     public Button myCapbotsButton;
     public GameObject capbotTabScreen;
+
+    [Header("Navigation - back-button targets")]
+    public GameObject loginScreen;      // NEW: fallback for X/guest path
+    public GameObject walletScreen;     // NEW: primary for Phantom-authed users
+
     private GameObject ragePreview;
     private GameObject tsunamiPreview;
     private GameObject healspikePreview;
 
-    // Track original child scales so OnDisable can restore cleanly
     private Dictionary<Transform, Vector3> originalChildScales = new Dictionary<Transform, Vector3>();
     private bool childScalingApplied = false;
 
     private bool isMobile = false;
 
-    // Tier display tables — must mirror Solana program tier ranges
-    // (Day 2 lock: Evergreen 0-14M, Aquashrine 15-39M, Magmamine 40-59M, King 60M)
     private static readonly string[] TIER_NAMES = { "Evergreen", "Aquashrine", "Magmamine", "King" };
     private static readonly float[]  TIER_MULTIPLIERS = { 1.0f, 1.4f, 1.9f, 2.8f };
 
@@ -63,7 +66,7 @@ public class StarterSelectionScreen : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
         isMobile = IsMobile();
 #elif UNITY_EDITOR
-        isMobile = false;   // Set to true when testing mobile in Editor
+        isMobile = false;
 #endif
     }
 
@@ -77,33 +80,68 @@ public class StarterSelectionScreen : MonoBehaviour
 
         if (closeButton != null)
             closeButton.onClick.AddListener(() => gameObject.SetActive(false));
+
+        if (backButton != null)
+        {
+            backButton.onClick.RemoveAllListeners();
+            backButton.onClick.AddListener(OnBackButton);
+        }
+
         if (myCapbotsButton != null)
         {
             myCapbotsButton.onClick.RemoveAllListeners();
             myCapbotsButton.onClick.AddListener(OpenCapbotTab);
-            // Hide the button if no NFT staked
             var p = FirebaseManager.Instance.currentPlayer;
             myCapbotsButton.gameObject.SetActive(p != null && p.stakedTier >= 0);
         }
         CreateLivePreviews();
         RefreshCoins();
         UpdateUI();
-        UpdateTierBadge();   // NEW: show staked NFT tier if user has linked wallet
+        UpdateTierBadge();
 
-        // === Scale all canvas children 3x on BOTH mobile and desktop ===
         ApplyChildScaling();
     }
 
-    /// <summary>
-    /// Scales every direct child of the starter canvas to 3x its original scale.
-    /// Does NOT touch the canvas itself — it is Screen Space - Camera so the
-    /// canvas transform is camera-managed.
-    /// </summary>
     private void OpenCapbotTab()
     {
-        gameObject.SetActive(false);
-        if (capbotTabScreen != null) capbotTabScreen.SetActive(true);
+        if (capbotTabScreen == null) return;
+        TransitionTo(capbotTabScreen);
     }
+
+    /// <summary>
+    /// Back button — Phantom-authed users return to WalletScreen, X/guest users
+    /// return to LoginScreen. Routing is based on whether the in-memory player
+    /// has a Solana wallet address (set by the Phantom path, null otherwise).
+    /// </summary>
+    private void OnBackButton()
+    {
+        var p = FirebaseManager.Instance != null ? FirebaseManager.Instance.currentPlayer : null;
+        bool wasPhantom = p != null && !string.IsNullOrEmpty(p.solanaWalletAddress);
+
+        GameObject target = (wasPhantom && walletScreen != null) ? walletScreen : loginScreen;
+        if (target == null)
+        {
+            Debug.LogError("[StarterSelectionScreen] Back target missing — neither walletScreen nor loginScreen wired");
+            return;
+        }
+
+        Debug.Log($"=== [StarterSelectionScreen] Back → {(wasPhantom ? "WalletScreen" : "LoginScreen")} ===");
+
+        CleanupPreviews();
+        TransitionTo(target);
+    }
+
+    private void TransitionTo(GameObject target)
+    {
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null) sm.GoTo(gameObject, target);
+        else
+        {
+            gameObject.SetActive(false);
+            target.SetActive(true);
+        }
+    }
+
     private void ApplyChildScaling()
     {
         if (starterCanvas == null)
@@ -217,30 +255,35 @@ public class StarterSelectionScreen : MonoBehaviour
         }
     }
 
+    private void CleanupPreviews()
+    {
+        if (ragePreview != null) { DOTween.Kill(ragePreview, true); Destroy(ragePreview); }
+        if (tsunamiPreview != null) { DOTween.Kill(tsunamiPreview, true); Destroy(tsunamiPreview); }
+        if (healspikePreview != null) { DOTween.Kill(healspikePreview, true); Destroy(healspikePreview); }
+        ragePreview = null;
+        tsunamiPreview = null;
+        healspikePreview = null;
+    }
+
     private void SelectStarter(string starterName)
     {
         Debug.Log("=== [StarterSelectionScreen] Starter selected: " + starterName);
 
-        if (ragePreview != null) { DOTween.Kill(ragePreview, true); Destroy(ragePreview); }
-        if (tsunamiPreview != null) { DOTween.Kill(tsunamiPreview, true); Destroy(tsunamiPreview); }
-        if (healspikePreview != null) { DOTween.Kill(healspikePreview, true); Destroy(healspikePreview); }
+        CleanupPreviews();
 
         if (FirebaseManager.Instance.currentPlayer != null)
         {
             FirebaseManager.Instance.currentPlayer.currentStarter = starterName;
         }
 
-        gameObject.SetActive(false);
-
         BettingScreen bettingScreen = FindFirstObjectByType<BettingScreen>(FindObjectsInactive.Include);
-        if (bettingScreen != null)
-        {
-            bettingScreen.gameObject.SetActive(true);
-        }
-        else
+        if (bettingScreen == null)
         {
             Debug.LogError("=== [StarterSelectionScreen] BettingScreen not found! ===");
+            return;
         }
+
+        TransitionTo(bettingScreen.gameObject);
     }
 
     private void UpdateUI()
@@ -252,12 +295,6 @@ public class StarterSelectionScreen : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Show the staked NFT tier + brain steps + multiplier as a small badge on the
-    /// starter screen, so NFT holders see their buff carrying through. Hidden for
-    /// non-NFT users (including guests) — the tierBadgeText GameObject is toggled
-    /// off entirely so it leaves no visual residue on the layout.
-    /// </summary>
     private void UpdateTierBadge()
     {
         if (tierBadgeText == null) return;
@@ -271,16 +308,13 @@ public class StarterSelectionScreen : MonoBehaviour
 
         int tier = Mathf.Clamp(player.stakedTier, 0, TIER_NAMES.Length - 1);
         float steps = player.stakedBrainSteps / 1_000_000f;
-        tierBadgeText.text = $"{TIER_NAMES[tier]} · {steps:0.0}M brain · {TIER_MULTIPLIERS[tier]:0.0}×";
+        tierBadgeText.text = $"{TIER_NAMES[tier]} · {steps:0.0}M brain · {TIER_MULTIPLIERS[tier]:0.0}x";
         tierBadgeText.gameObject.SetActive(true);
     }
 
     void OnDisable()
     {
         RestoreChildScaling();
-
-        if (ragePreview != null) Destroy(ragePreview);
-        if (tsunamiPreview != null) Destroy(tsunamiPreview);
-        if (healspikePreview != null) Destroy(healspikePreview);
+        CleanupPreviews();
     }
 }

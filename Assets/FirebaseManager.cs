@@ -356,13 +356,33 @@ public void GetCapbotData(Action<CapbotData> onSuccess, Action<string> onError)
         pendingCapbotError = onError;
         GetCapbotDataJS();
 #else
-        // Editor stub
+        // Editor stub: build a single-stake CapbotData from currentPlayer flat fields
+        CapbotStakeEntry[] stubStakes;
+        if (currentPlayer.stakedTier >= 0 && !string.IsNullOrEmpty(currentPlayer.stakedAssetId))
+        {
+            stubStakes = new CapbotStakeEntry[]
+            {
+                new CapbotStakeEntry
+                {
+                    assetId = currentPlayer.stakedAssetId,
+                    tier = currentPlayer.stakedTier,
+                    brainSteps = currentPlayer.stakedBrainSteps,
+                    lastBattleAt = 0L,
+                }
+            };
+        }
+        else
+        {
+            stubStakes = new CapbotStakeEntry[0];
+        }
+
         var fake = new CapbotData
         {
             stakedTier = currentPlayer.stakedTier,
             stakedBrainSteps = currentPlayer.stakedBrainSteps,
             stakedAssetId = currentPlayer.stakedAssetId,
             walletAddress = currentPlayer.solanaWalletAddress,
+            stakes = stubStakes,
             recentBattles = new CapbotBattleEntry[0],
             recentUpgrades = new BrainUpgradeEntry[0],
         };
@@ -642,15 +662,25 @@ public void GetCapbotData(Action<CapbotData> onSuccess, Action<string> onError)
         public float appliedMultiplier;   // 1.0/1.4/1.9/2.8 — used for "+X (M× Tier)" UI
     }
 
-[Serializable]
+    [Serializable]
     public class CapbotData
     {
         public int stakedTier;
         public long stakedBrainSteps;
         public string stakedAssetId;
         public string walletAddress;
+        public CapbotStakeEntry[] stakes;          // NEW: multi-stake array (CF returns this)
         public CapbotBattleEntry[] recentBattles;
         public BrainUpgradeEntry[] recentUpgrades;
+    }
+
+    [Serializable]
+    public class CapbotStakeEntry
+    {
+        public string assetId;
+        public int tier;
+        public long brainSteps;     // long matches CapbotData.stakedBrainSteps for type consistency
+        public long lastBattleAt;
     }
 
     [Serializable]
@@ -663,6 +693,7 @@ public void GetCapbotData(Action<CapbotData> onSuccess, Action<string> onError)
         public float multiplier;
         public bool playerWon;
         public string battleId;
+        public string stakedAssetId;   // NEW: per-stake filter for pagination
     }
 
     [Serializable]
@@ -672,9 +703,10 @@ public void GetCapbotData(Action<CapbotData> onSuccess, Action<string> onError)
         public long oldBrainSteps;
         public long newBrainSteps;
         public string txSignature;
-        public long coinsBurned;     // (added in §7.G if not yet)
-        public string burnCurrency;  // (added in §7.G if not yet)
-        public string battleId;  
+        public long coinsBurned;
+        public string burnCurrency;
+        public string battleId;
+        public string stakedAssetId;   // NEW: per-stake filter for pagination
     }
     
     [Serializable]

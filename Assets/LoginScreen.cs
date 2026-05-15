@@ -17,18 +17,22 @@ public class LoginScreen : MonoBehaviour
 
     [Header("Screens - Drag these in the Inspector")]
     public GameObject starterSelectionScreen;
-    public GameObject walletScreen;   // Shown after Phantom login (wallet confirmation + tier badge). X and guest paths skip this entirely.
+    public GameObject walletScreen;
 
     [Header("Canvas")]
-    public Canvas loginCanvas;     // Drag this screen's Canvas here (Screen Space - Camera)
+    public Canvas loginCanvas;
 
     private bool isMobile = false;
 
+    // Captured ONCE in Awake so revisits don't compound offsets.
+    // Was previously re-captured in OnEnable, which meant each revisit
+    // pushed the Guest button down by another 110 (mobile) / 200 (desktop)
+    // because the "original" position it captured was already-offset.
     private Vector2 originalGuestButtonPos;
     private Vector3 originalXScale;
     private Vector3 originalGuestScale;
+    private bool originalsCaptured = false;
 
-    // Track original child scales so OnDisable can restore cleanly
     private Dictionary<Transform, Vector3> originalChildScales = new Dictionary<Transform, Vector3>();
     private bool childScalingApplied = false;
 
@@ -42,75 +46,94 @@ public class LoginScreen : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
         isMobile = IsMobile();
 #elif UNITY_EDITOR
-        isMobile = false;   // ← Set to true when testing mobile in Editor
+        isMobile = false;
 #endif
+
+        // Capture original positions/scales ONCE — these are the "home" values
+        // from the prefab/scene. OnEnable will compute its layout offsets
+        // against these and never re-capture, so revisits land in the same place.
+        CaptureOriginalsIfNeeded();
+    }
+
+    private void CaptureOriginalsIfNeeded()
+    {
+        if (originalsCaptured) return;
+
+        if (playAsGuestButton != null)
+            originalGuestButtonPos = playAsGuestButton.GetComponent<RectTransform>().anchoredPosition;
+
+        if (loginWithXButton != null)
+            originalXScale = loginWithXButton.transform.localScale;
+
+        if (playAsGuestButton != null)
+            originalGuestScale = playAsGuestButton.transform.localScale;
+
+        originalsCaptured = true;
     }
 
     void OnEnable()
     {
-        loginWithXButton.onClick.AddListener(OnXLoginClicked);
-        playAsGuestButton.onClick.AddListener(OnGuestClicked);
+        // Defensive: if Awake didn't run (e.g. screen instantiated late), still capture.
+        CaptureOriginalsIfNeeded();
+
+        // RemoveAllListeners first so revisits don't stack duplicate click handlers.
+        // Previously every revisit added another OnXLoginClicked subscription, causing
+        // one click to fire the handler N+1 times.
+        if (loginWithXButton != null)
+        {
+            loginWithXButton.onClick.RemoveAllListeners();
+            loginWithXButton.onClick.AddListener(OnXLoginClicked);
+        }
+        if (playAsGuestButton != null)
+        {
+            playAsGuestButton.onClick.RemoveAllListeners();
+            playAsGuestButton.onClick.AddListener(OnGuestClicked);
+        }
         if (loginWithPhantomButton != null)
+        {
+            loginWithPhantomButton.onClick.RemoveAllListeners();
             loginWithPhantomButton.onClick.AddListener(OnPhantomLoginClicked);
+        }
 
         if (statusText != null)
             statusText.text = "";
 
-        // Store originals BEFORE any scaling is applied
-        if (playAsGuestButton != null)
-            originalGuestButtonPos = playAsGuestButton.GetComponent<RectTransform>().anchoredPosition;
-
-        originalXScale = loginWithXButton.transform.localScale;
-        originalGuestScale = playAsGuestButton.transform.localScale;
-
-        // === Scale canvas children 3x on BOTH mobile and desktop ===
-        // This grows the background/frames/text etc. The buttons also get scaled
-        // by this pass, but we override them right after to land at the exact
-        // final size we want on each platform.
         ApplyChildScaling();
 
-        // === Per-platform button overrides (applied AFTER canvas-child scaling so
-        //     they replace, not compound) ===
+        // Apply layout from the ORIGINAL captured positions/scales each time.
+        // Because originalGuestButtonPos is captured once and never overwritten,
+        // the final position is deterministic regardless of how many times the
+        // user has bounced into and out of this screen.
         if (isMobile)
         {
-            // Mobile: exactly 2x the original inspector scale (no compounding)
-            loginWithXButton.transform.localScale = originalXScale * 1f;
-            playAsGuestButton.transform.localScale = originalGuestScale * 1f;
+            if (loginWithXButton != null) loginWithXButton.transform.localScale = originalXScale * 1f;
+            if (playAsGuestButton != null) playAsGuestButton.transform.localScale = originalGuestScale * 1f;
 
-            // Guest button offset down 110px
             if (playAsGuestButton != null)
             {
                 RectTransform rt = playAsGuestButton.GetComponent<RectTransform>();
-                rt.anchoredPosition = originalGuestButtonPos + new Vector2(0, -110f);
+                rt.anchoredPosition = originalGuestButtonPos + new Vector2(0, -190f);
             }
 
-            Debug.Log("=== [LoginScreen] Mobile: buttons at 2x original scale, Guest moved -110y ===");
+            Debug.Log("=== [LoginScreen] Mobile: Guest at original -110y ===");
         }
         else
         {
-            // Desktop: restore buttons to their original inspector scale
-            // (your inspector values already have whatever scale you want for desktop)
-            loginWithXButton.transform.localScale = originalXScale;
-            playAsGuestButton.transform.localScale = originalGuestScale;
+            if (loginWithXButton != null) loginWithXButton.transform.localScale = originalXScale;
+            if (playAsGuestButton != null) playAsGuestButton.transform.localScale = originalGuestScale;
 
-            // Guest button offset down 200px
             if (playAsGuestButton != null)
             {
                 RectTransform rt = playAsGuestButton.GetComponent<RectTransform>();
                 rt.anchoredPosition = originalGuestButtonPos + new Vector2(0, -200f);
             }
 
-            Debug.Log("=== [LoginScreen] Desktop: buttons at original scale, Guest moved -200y ===");
+            Debug.Log("=== [LoginScreen] Desktop: Guest at original -200y ===");
         }
 
         Debug.Log("=== [LoginScreen] OnEnable - Ready ===");
     }
 
-    /// <summary>
-    /// Scales every direct child of the login canvas to 3x its original scale.
-    /// Does NOT touch the canvas itself: it is Screen Space - Camera so the
-    /// canvas transform is camera-managed.
-    /// </summary>
     private void ApplyChildScaling()
     {
         if (loginCanvas == null)
@@ -158,8 +181,6 @@ public class LoginScreen : MonoBehaviour
         FirebaseManager.Instance.SignInWithTwitter(
             onSuccess: () => {
                 statusText.text = "✅ Signed in! Choosing starter...";
-                // X login skips the wallet screen entirely. X users are legacy /
-                // no-wallet path; the wallet flow is reserved for Phantom auth.
                 ShowStarterSelection();
             },
             onError: (error) => {
@@ -180,7 +201,7 @@ public class LoginScreen : MonoBehaviour
         FirebaseManager.Instance.StartAsGuest(() =>
         {
             statusText.text = "✅ Guest mode active. Choosing starter...";
-            ShowStarterSelection();   // Guests skip the wallet screen — guests can't link
+            ShowStarterSelection();
         });
     }
 
@@ -195,11 +216,6 @@ public class LoginScreen : MonoBehaviour
         FirebaseManager.Instance.SignInWithWallet(
             onSuccess: (uid) => {
                 statusText.text = "✅ Wallet signed in! Verifying stake...";
-                // Phantom login routes to WalletScreen so the user sees their
-                // tier badge (or gets the "Get Capmon NFT" prompt if they have
-                // no stake yet). The Continue button on WalletScreen is gated
-                // until they have an active NFT, which keeps the flow committed
-                // to "every Phantom user plays with a Capbot."
                 ShowWalletScreen();
             },
             onError: (error) => {
@@ -209,41 +225,45 @@ public class LoginScreen : MonoBehaviour
         );
     }
 
-    /// <summary>
-    /// Activates the wallet linking screen. Only reachable from Phantom login.
-    /// X login and guest mode skip this and go directly to starter selection.
-    /// </summary>
     private void ShowWalletScreen()
     {
-        gameObject.SetActive(false);
-        Debug.Log("=== [LoginScreen] Hiding LoginScreen, opening WalletScreen ===");
+        Debug.Log("=== [LoginScreen] Transitioning to WalletScreen ===");
 
-        if (walletScreen != null)
+        if (walletScreen == null)
         {
-            Debug.Log("=== [LoginScreen] SUCCESS: Activating WalletScreen ===");
-            walletScreen.SetActive(true);
-        }
-        else
-        {
-            // Fallback: if walletScreen isn't wired up yet, skip straight to starter selection.
             Debug.LogWarning("=== [LoginScreen] walletScreen not assigned, falling through to StarterSelectionScreen ===");
-            if (starterSelectionScreen != null) starterSelectionScreen.SetActive(true);
+            ShowStarterSelection();
+            return;
         }
+
+        TransitionTo(walletScreen);
     }
 
     private void ShowStarterSelection()
     {
-        gameObject.SetActive(false);
-        Debug.Log("=== [LoginScreen] Hiding LoginScreen ===");
+        Debug.Log("=== [LoginScreen] Transitioning to StarterSelectionScreen ===");
 
-        if (starterSelectionScreen != null)
+        if (starterSelectionScreen == null)
         {
-            Debug.Log("=== [LoginScreen] SUCCESS: Activating StarterSelectionScreen ===");
-            starterSelectionScreen.SetActive(true);
+            Debug.LogError("=== [LoginScreen] CRITICAL: StarterSelectionScreen reference missing in Inspector! ===");
+            return;
+        }
+
+        TransitionTo(starterSelectionScreen);
+    }
+
+    private void TransitionTo(GameObject target)
+    {
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null)
+        {
+            sm.GoTo(gameObject, target);
         }
         else
         {
-            Debug.LogError("=== [LoginScreen] CRITICAL: StarterSelectionScreen reference missing in Inspector! ===");
+            Debug.LogWarning("=== [LoginScreen] ScreenTransitionManager not present, doing instant swap ===");
+            gameObject.SetActive(false);
+            target.SetActive(true);
         }
     }
 

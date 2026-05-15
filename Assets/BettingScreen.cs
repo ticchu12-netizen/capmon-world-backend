@@ -8,9 +8,9 @@ using System.Runtime.InteropServices;
 public class BettingScreen : MonoBehaviour
 {
     [Header("Prefabs - Drag your character prefabs here")]
-    public GameObject firePrefab;      // Rageblaze
-    public GameObject waterPrefab;     // Tsunami
-    public GameObject grassPrefab;     // Healspike
+    public GameObject firePrefab;
+    public GameObject waterPrefab;
+    public GameObject grassPrefab;
 
     [Header("UI References")]
     public TMP_Text currentStarterText;
@@ -23,35 +23,37 @@ public class BettingScreen : MonoBehaviour
     public Slider betSlider;
     public TMP_Text betValueText;
     public Button confirmButton;
+    public Button backButton;
     public TMP_Text statusText;
     [SerializeField] private GameObject battleBackground;
 
     [Header("Tier payout preview (NFT-staked players only)")]
-    public TMP_Text payoutPreviewText;   // e.g. "Win: 14,000 (5,000 × 2.8× King)"
+    public TMP_Text payoutPreviewText;
 
     [Header("Canvas")]
-    public Canvas bettingCanvas;   // Drag your BettingScreen's Canvas here (Screen Space - Camera)
+    public Canvas bettingCanvas;
 
-    [Header("Live Preview References")]
+    [Header("Navigation")]
+    public GameObject starterSelectionScreen;
+
     private GameObject playerPreview;
     private GameObject aiRagePreview;
     private GameObject aiTsunamiPreview;
     private GameObject aiHealspikePreview;
 
+    // Captured ONCE in Awake. Same drift bug as LoginScreen used to have:
+    // re-capturing in OnEnable meant each revisit added +90 on top of the
+    // already-offset position (mobile only).
     private Vector2 originalBetSliderPos;
     private Vector2 originalBetValuePos;
     private Vector2 originalConfirmPos;
+    private bool originalsCaptured = false;
 
-    // Track which direct children we've scaled so we can restore them on disable
     private Dictionary<Transform, Vector3> originalChildScales = new Dictionary<Transform, Vector3>();
     private bool childScalingApplied = false;
 
     private bool isMobile = false;
 
-    
-
-    // Tier display tables — must mirror Cloud Function CONFIG.TIER_MULTIPLIERS
-    // and Unity-side WalletScreen/StarterSelectionScreen tables. Locked Day 2.
     private static readonly string[] TIER_NAMES = { "Evergreen", "Aquashrine", "Magmamine", "King" };
     private static readonly float[]  TIER_MULTIPLIERS = { 1.0f, 1.4f, 1.9f, 2.8f };
 
@@ -65,20 +67,50 @@ public class BettingScreen : MonoBehaviour
 #if UNITY_WEBGL && !UNITY_EDITOR
         isMobile = IsMobile();
 #elif UNITY_EDITOR
-        isMobile = false;   // change to true if you want to test mobile in Editor
+        isMobile = false;
 #endif
+
+        CaptureOriginalsIfNeeded();
+    }
+
+    private void CaptureOriginalsIfNeeded()
+    {
+        if (originalsCaptured) return;
+
+        if (betSlider != null)
+            originalBetSliderPos = betSlider.GetComponent<RectTransform>().anchoredPosition;
+        if (betValueText != null)
+            originalBetValuePos = betValueText.GetComponent<RectTransform>().anchoredPosition;
+        if (confirmButton != null)
+            originalConfirmPos = confirmButton.GetComponent<RectTransform>().anchoredPosition;
+
+        originalsCaptured = true;
     }
 
     void OnEnable()
     {
+        // Defensive: in case Awake didn't fire (screen instantiated late)
+        CaptureOriginalsIfNeeded();
+
         if (battleBackground != null)
-    {
-        battleBackground.SetActive(false);
-    }
+        {
+            battleBackground.SetActive(false);
+        }
         betSlider.minValue = 1000f;
         betSlider.maxValue = 10000f;
+
+        // RemoveAllListeners before AddListener to prevent stacking on revisits
+        betSlider.onValueChanged.RemoveAllListeners();
         betSlider.onValueChanged.AddListener(OnBetValueChanged);
+
+        confirmButton.onClick.RemoveAllListeners();
         confirmButton.onClick.AddListener(OnConfirmBet);
+
+        if (backButton != null)
+        {
+            backButton.onClick.RemoveAllListeners();
+            backButton.onClick.AddListener(OnBackButton);
+        }
 
         TMP_Text buttonText = confirmButton.GetComponentInChildren<TMP_Text>();
         if (buttonText != null && string.IsNullOrEmpty(buttonText.text))
@@ -88,18 +120,13 @@ public class BettingScreen : MonoBehaviour
         betSlider.interactable = true;
         statusText.text = "";
 
-        // Store original positions (needed for mobile offset; harmless on desktop)
-        if (betSlider != null) originalBetSliderPos = betSlider.GetComponent<RectTransform>().anchoredPosition;
-        if (betValueText != null) originalBetValuePos = betValueText.GetComponent<RectTransform>().anchoredPosition;
-        if (confirmButton != null) originalConfirmPos = confirmButton.GetComponent<RectTransform>().anchoredPosition;
-
         CreateLivePreviews();
         UpdateUI();
 
-        // === Scale canvas children 3x on BOTH mobile and desktop ===
         ApplyChildScaling();
 
-        // === Mobile-only: move slider + bet text + confirm button up 90px ===
+        // Mobile-only offset, applied against the captured-once originals so
+        // there's no drift across revisits.
         if (isMobile)
         {
             if (betSlider != null)
@@ -111,13 +138,19 @@ public class BettingScreen : MonoBehaviour
 
             Debug.Log("=== [BettingScreen] Mobile-specific UI moved up 90px ===");
         }
+        else
+        {
+            // Desktop: ensure positions match the original (in case a previous
+            // OnEnable in mobile mode set them; cheap to be defensive).
+            if (betSlider != null)
+                betSlider.GetComponent<RectTransform>().anchoredPosition = originalBetSliderPos;
+            if (betValueText != null)
+                betValueText.GetComponent<RectTransform>().anchoredPosition = originalBetValuePos;
+            if (confirmButton != null)
+                confirmButton.GetComponent<RectTransform>().anchoredPosition = originalConfirmPos;
+        }
     }
 
-    /// <summary>
-    /// Scales every direct child of the betting canvas to 3x its original scale.
-    /// Does NOT touch the canvas transform itself — it is Screen Space - Camera
-    /// and its transform is camera-managed.
-    /// </summary>
     private void ApplyChildScaling()
     {
         if (bettingCanvas == null)
@@ -282,20 +315,15 @@ public class BettingScreen : MonoBehaviour
 
         betValueText.text = ((int)betSlider.value).ToString("N0");
 
-        UpdatePayoutPreview();   // NEW: show projected payout w/ tier multiplier
+        UpdatePayoutPreview();
     }
 
     private void OnBetValueChanged(float value)
     {
         betValueText.text = ((int)value).ToString("N0");
-        UpdatePayoutPreview();   // NEW: re-compute as slider moves
+        UpdatePayoutPreview();
     }
 
-    /// <summary>
-    /// Show projected payout for the current bet, factoring in the staked NFT
-    /// tier multiplier. Hidden for non-NFT users (no clutter for the base game
-    /// experience). Mirrors server math in resolveMatch (Math.Floor(bet × mult)).
-    /// </summary>
     private void UpdatePayoutPreview()
     {
         if (payoutPreviewText == null) return;
@@ -312,7 +340,7 @@ public class BettingScreen : MonoBehaviour
         float mult = TIER_MULTIPLIERS[tier];
         int winnings = Mathf.FloorToInt(bet * mult);
 
-        payoutPreviewText.text = $"Win: {winnings:N0} ({bet:N0} × {mult:0.0}× {TIER_NAMES[tier]})";
+        payoutPreviewText.text = $"Win: {winnings:N0} ({bet:N0} x {mult:0.0}x {TIER_NAMES[tier]})";
         payoutPreviewText.gameObject.SetActive(true);
     }
 
@@ -320,22 +348,29 @@ public class BettingScreen : MonoBehaviour
     {
         int bet = (int)betSlider.value;
 
+        confirmButton.interactable = false;
+        betSlider.interactable = false;
+        statusText.text = "Starting match...";
+
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null) sm.GoToWithAction(() => EnterBattle(bet));
+        else EnterBattle(bet);
+    }
+
+    private void EnterBattle(int bet)
+    {
         AttackMenu attackMenu = FindFirstObjectByType<AttackMenu>(FindObjectsInactive.Include);
         if (attackMenu != null)
         {
             attackMenu.StartMatchWithBet(bet);
         }
 
-        confirmButton.interactable = false;
-        betSlider.interactable = false;
-        statusText.text = "Starting match...";
-
-
         GameManager gm = FindFirstObjectByType<GameManager>();
         if (gm != null && FirebaseManager.Instance.currentPlayer != null)
         {
             gm.StartBattleWithSelectedStarter(FirebaseManager.Instance.currentPlayer.currentStarter);
             gameObject.SetActive(false);
+            if (battleBackground != null) battleBackground.SetActive(true);
         }
         else
         {
@@ -343,10 +378,25 @@ public class BettingScreen : MonoBehaviour
             confirmButton.interactable = true;
             betSlider.interactable = true;
         }
-        if (battleBackground != null)
-    {
-        battleBackground.SetActive(true);
     }
+
+    private void OnBackButton()
+    {
+        Debug.Log("=== [BettingScreen] Back pressed — returning to StarterSelectionScreen ===");
+
+        if (starterSelectionScreen == null)
+        {
+            Debug.LogError("[BettingScreen] starterSelectionScreen not assigned!");
+            return;
+        }
+
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null) sm.GoTo(gameObject, starterSelectionScreen);
+        else
+        {
+            gameObject.SetActive(false);
+            starterSelectionScreen.SetActive(true);
+        }
     }
 
     void OnDisable()

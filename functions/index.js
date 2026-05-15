@@ -823,7 +823,6 @@ exports.getCapbotData = onCall({
     enforceAppCheck: false,
     cors: ALLOWED_ORIGINS,
 }, async (request) => {
-
     if (!request.auth) {
         throw new HttpsError("unauthenticated", "Must be signed in.");
     }
@@ -836,37 +835,49 @@ exports.getCapbotData = onCall({
     }
     const player = playerSnap.data();
 
-    // ---------- 2. RECENT AUTONOMOUS BATTLES ----------
-    // Most recent first. capbot-server writes these in runBattleForPlayer().
+    // ---------- 2. STAKES SUBCOLLECTION (multi-stake) ----------
+    const stakesSnap = await db.collection("players").doc(uid).collection("stakes").get();
+    const stakes = stakesSnap.docs.map(d => {
+        const x = d.data();
+        return {
+            assetId: x.assetId,
+            tier: x.tier,
+            brainSteps: x.brainSteps,
+            lastBattleAt: x.lastBattleAt ?? 0,
+        };
+    });
+
+    // ---------- 3. RECENT AUTONOMOUS BATTLES ----------
     const battlesSnap = await db.collection("capbot_activity")
         .where("uid", "==", uid)
         .orderBy("timestamp", "desc")
         .limit(20)
         .get();
 
-    // ---------- 3. RECENT ON-CHAIN BRAIN UPGRADES ----------
-    // Most recent first. capbot-server writes these in upgradeBrainOnChain()
-    // after a successful Ed25519-verified upgrade_brain_v2 tx.
+    // ---------- 4. RECENT ON-CHAIN BRAIN UPGRADES ----------
     const upgradesSnap = await db.collection("brain_upgrades")
         .where("uid", "==", uid)
         .orderBy("timestamp", "desc")
         .limit(10)
         .get();
 
-    // ---------- 4. SHAPE RESPONSE FOR UNITY (JsonUtility-compatible) ----------
-    // Field names match CapbotData / CapbotBattleEntry / BrainUpgradeEntry
-    // [Serializable] classes in FirebaseManager.cs. Don't rename fields here
-    // without updating the C# side (silent JsonUtility default failure).
     return {
+        // Legacy flat fields — kept for back-compat with current Unity UI.
+        // Mirror of highest-tier stake, refreshed by capbot-server discovery cron.
         stakedTier: player.stakedTier ?? -1,
         stakedBrainSteps: player.stakedBrainSteps ?? 0,
         stakedAssetId: player.stakedAssetId ?? null,
         walletAddress: player.solanaWalletAddress ?? null,
+
+        // NEW: full array of all stakes owned by this user.
+        stakes,
+
         recentBattles: battlesSnap.docs.map(d => {
             const x = d.data();
             return {
                 timestamp: x.timestamp,
                 battleId: x.battleId,
+                stakedAssetId: x.stakedAssetId ?? null,
                 capbotType: x.capbotType,
                 defeatedAi: x.defeatedAi,
                 payout: x.payout,
@@ -879,6 +890,7 @@ exports.getCapbotData = onCall({
             return {
                 timestamp: x.timestamp,
                 battleId: x.battleId,
+                stakedAssetId: x.stakedAssetId ?? null,
                 oldBrainSteps: x.oldBrainSteps,
                 newBrainSteps: x.newBrainSteps,
                 txSignature: x.txSignature,
@@ -886,7 +898,6 @@ exports.getCapbotData = onCall({
         }),
     };
 });
-
 
 // ============================================================
 // cleanupIdempotencyKeys — daily cleanup of expired keys

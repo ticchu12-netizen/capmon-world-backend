@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using DG.Tweening;
 using System.Collections;
+using System.Runtime.InteropServices;
 
 public class GameManager : MonoBehaviour
 {
@@ -13,8 +14,22 @@ public class GameManager : MonoBehaviour
     public Canvas mainCanvas;
     public Transform background;
 
+    [Header("Battle background reference for Play Again fade (optional)")]
+    public GameObject battleBackground;
+
     private GameObject[] prefabs;
     private float[] scales = new float[] { 40f, 40f, 15f };
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+    // Auto-refocus the Unity canvas when the user returns to the game window
+    // after an external popup (X OAuth, Phantom wallet connect, etc.). This
+    // does NOT try to keep the game running while focus is elsewhere — the
+    // browser controls that and will pause regardless. It only nudges focus
+    // back to the canvas once the user returns, so they don't have to manually
+    // click into the game area to wake it. See Assets/Plugins/WebGL/WebGLAutoResume.jslib
+    [DllImport("__Internal")]
+    private static extern void EnableWebGLAutoResume();
+#endif
 
     void Awake()
     {
@@ -23,7 +38,15 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
+
         Debug.Log("=== [GameManager] Start() called ===");
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // Install auto-resume early so it's active before any login popups
+        // (X sign-in, Phantom connect) can fire. Safe to call once at startup.
+        EnableWebGLAutoResume();
+#endif
+
         FirebaseManager.Instance.InitializeFirebase();
 
         if (attackMenu != null)
@@ -144,10 +167,26 @@ public class GameManager : MonoBehaviour
         ResetBattle();
     }
 
+    /// <summary>
+    /// Play Again — fades to black, tears down the battle, activates Starter Selection,
+    /// then fades back in. Uses GoToWithAction because the battle isn't a single
+    /// GameObject (player/ai chars, attackMenu, UI panels, damage effects).
+    /// </summary>
     public void ResetBattle()
     {
         Debug.Log("=== [GameManager] Play Again → Full cleanup + Starter Selection ===");
 
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null) sm.GoToWithAction(DoResetBattleCleanup);
+        else DoResetBattleCleanup();
+    }
+
+    /// <summary>
+    /// The actual teardown + screen swap. Extracted so it can run inside
+    /// the transition blackout (when manager exists) or instantly (when it doesn't).
+    /// </summary>
+    private void DoResetBattleCleanup()
+    {
         DOTween.KillAll(false);
 
         if (attackMenu.player != null && attackMenu.player.gameObject != null)
@@ -172,6 +211,9 @@ public class GameManager : MonoBehaviour
 
         if (uiManager != null) uiManager.HideAllPanels();
 
+        // Hide battle background during the swap so the starter screen comes up clean
+        if (battleBackground != null) battleBackground.SetActive(false);
+
         // === Destroy any lingering DamageEffect INSTANCES ===
         // IMPORTANT: if attackMenu.damageEffectPrefab is a scene object (dragged in from
         // the Hierarchy rather than a Project-window asset), FindObjectsByType will
@@ -186,11 +228,6 @@ public class GameManager : MonoBehaviour
         foreach (DamageEffect effect in lingeringEffects)
         {
             if (effect == null) continue;
-
-            // Skip the prefab template itself if it lives in the scene.
-            // Object identity (==) is the right check: for a scene-object template, the
-            // GameObject reference matches; for a Project asset, Instantiate copies never
-            // match the asset, so this branch simply never fires. Safe either way.
             if (prefabTemplate != null && effect.gameObject == prefabTemplate)
             {
                 skippedTemplateCount++;

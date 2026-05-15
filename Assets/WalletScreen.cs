@@ -8,31 +8,6 @@ using DG.Tweening;
 /// <summary>
 /// Wallet linking UI screen. Shown after LoginScreen for Phantom auth only.
 /// X auth and guest mode skip this entirely and go directly to starter selection.
-///
-/// On Phantom auth the user lands here already connected (the LoginScreen
-/// Phantom button drove the sign-in). The connect button reads "Linked!" in
-/// light green and is non-interactive. The user then sees one of two states:
-///   - Connected, no staked NFT: text panel slides in from left, then the
-///     "Get Capmon NFT" button reveals (only visible in this state). They
-///     mint at play.capmon.fun and come back to refresh.
-///   - Connected, NFT staked: tier badge with emoji ("👑 King 60.0M brain 2.8×")
-///     and the Continue button becomes available.
-///
-/// The disconnected state ("Link Phantom Wallet" button) is preserved for edge
-/// cases (e.g., Phantom session dropped mid-flow, future "link from settings"
-/// surfaces) but is not the primary path under the current LoginScreen routing.
-///
-/// Continue button is hidden until wallet is linked AND an NFT is active.
-/// This commits the flow to "every Phantom user plays with a Capbot" and
-/// nudges users without an NFT toward the mint flow rather than letting them
-/// skip into manual mode with no Capbot.
-///
-/// Flow: Connect button -> WalletManager.ConnectWallet (Phantom popup) ->
-///       on success -> WalletManager.LinkWallet (sign-message popup -> Cloud
-///       Function -> on-chain query -> Firestore mirror) -> on success ->
-///       FirebaseManager.ApplyStakeStateFromLink (push tier into currentPlayer).
-///
-/// Continue advances to StarterSelectionScreen.
 /// </summary>
 public class WalletScreen : MonoBehaviour
 {
@@ -43,44 +18,37 @@ public class WalletScreen : MonoBehaviour
 
     [Header("Buttons")]
     [SerializeField] private Button connectButton;
-    [SerializeField] private TMP_Text connectButtonLabel;  // TMP_Text on the connect button (for "Linked!" state)
+    [SerializeField] private TMP_Text connectButtonLabel;
     [SerializeField] private Button refreshButton;
     [SerializeField] private Button disconnectButton;
-    [SerializeField] private Button continueButton;        // "Continue" -> StarterSelectionScreen
-    [SerializeField] private Button mintExternalButton;    // opens play.capmon.fun in new tab (no-NFT state only)
+    [SerializeField] private Button continueButton;
+    [SerializeField] private Button mintExternalButton;
+    [SerializeField] private Button backButton;        // NEW: back to LoginScreen
 
     [Header("Text fields")]
-    [SerializeField] private TMP_Text statusText;          // shared across panels
-    [SerializeField] private TMP_Text walletAddressText;   // truncated pubkey
-    [SerializeField] private TMP_Text tierBadgeText;       // "👑 King 60.0M brain 2.8×"
-    [SerializeField] private TMP_Text noNftHelpText;       // explanation copy on no-NFT panel
+    [SerializeField] private TMP_Text statusText;
+    [SerializeField] private TMP_Text walletAddressText;
+    [SerializeField] private TMP_Text tierBadgeText;
+    [SerializeField] private TMP_Text noNftHelpText;
 
-    [Header("Next screen")]
+    [Header("Navigation")]
     [SerializeField] private GameObject starterSelectionScreen;
+    [SerializeField] private GameObject loginScreen;   // NEW: back-target
 
-    // External URL the "Get Capmon NFT" button opens
     private const string MINT_URL = "https://play.capmon.fun";
 
-    // Tier display tables (must mirror Solana program tier ranges)
-    // Locked Day 2: Evergreen 0-14M, Aquashrine 15-39M, Magmamine 40-59M, King 60M
     private static readonly string[] TIER_NAMES = { "Evergreen", "Aquashrine", "Magmamine", "King" };
     private static readonly float[]  TIER_MULTIPLIERS = { 1.0f, 1.4f, 1.9f, 2.8f };
 
-    // Connect button color states
     private static readonly Color CONNECT_LABEL_DEFAULT = Color.white;
-    private static readonly Color CONNECT_LABEL_LINKED  = new Color(0.6f, 1.0f, 0.6f); // light green
+    private static readonly Color CONNECT_LABEL_LINKED  = new Color(0.6f, 1.0f, 0.6f);
 
-    // Animation tracking — only play slide-in when transitioning INTO no-NFT state,
-    // not on every refresh while the panel stays visible.
     private bool wasShowingNoNftPanel = false;
     private Vector2? cachedNoNftPanelHomePos = null;
     private Coroutine clearStatusCoroutine = null;
 
     void Awake()
     {
-        // Wire button listeners. Use AddListener (not onClick assignment in Inspector
-        // alone) so the bindings survive prefab reloads and don't get duplicated.
-        // Guard against double-bind by removing first.
         if (connectButton != null)
         {
             connectButton.onClick.RemoveAllListeners();
@@ -106,43 +74,34 @@ public class WalletScreen : MonoBehaviour
             mintExternalButton.onClick.RemoveAllListeners();
             mintExternalButton.onClick.AddListener(OnMintExternalButton);
         }
+        if (backButton != null)
+        {
+            backButton.onClick.RemoveAllListeners();
+            backButton.onClick.AddListener(OnBackButton);
+        }
     }
 
     void OnEnable()
     {
-        // Reset transition tracker so an animation plays again on screen re-entry.
         wasShowingNoNftPanel = false;
-
-        // Refresh state every time the screen is shown — handles the case where
-        // user disconnected externally in Phantom, or stake state changed via
-        // play.capmon.fun in another tab.
         RefreshUIFromCurrentState();
     }
 
-    /// <summary>
-    /// Recompute which panel is visible based on WalletManager + FirebaseManager state.
-    /// Called on enable + after every successful action.
-    /// </summary>
     public void RefreshUIFromCurrentState()
     {
         bool isConnected = WalletManager.Instance != null && WalletManager.Instance.IsConnected;
         var stake = WalletManager.Instance != null ? WalletManager.Instance.CurrentStake : null;
         bool hasNft = stake != null && stake.stakedTier >= 0;
 
-        // Content panel toggle (only one visible at a time)
         SetPanelActive(panelDisconnected, !isConnected);
         SetPanelActive(panelConnectedNoNft, isConnected && !hasNft);
         SetPanelActive(panelConnectedWithNft, isConnected && hasNft);
 
-        // Slide-in animation for no-NFT panel — only on transition INTO this state
         bool shouldShowNoNft = isConnected && !hasNft;
         bool justEnteredNoNft = shouldShowNoNft && !wasShowingNoNftPanel;
         if (justEnteredNoNft) PlayNoNftSlideIn();
         wasShowingNoNftPanel = shouldShowNoNft;
 
-        // Mint button visibility — only in no-NFT state. Animation controls
-        // its activation when entering; if we're staying in this state from
-        // a refresh, keep it visible.
         if (mintExternalButton != null)
         {
             if (!shouldShowNoNft)
@@ -153,12 +112,8 @@ public class WalletScreen : MonoBehaviour
             {
                 mintExternalButton.gameObject.SetActive(true);
             }
-            // else: animation OnComplete will activate it
         }
 
-        // Connect button — always visible. Becomes "Linked!" + light green +
-        // non-interactive once connected. The "Link Phantom Wallet" CTA only
-        // applies in the disconnected state.
         if (connectButton != null)
         {
             connectButton.gameObject.SetActive(true);
@@ -171,13 +126,9 @@ public class WalletScreen : MonoBehaviour
             }
         }
 
-        // Disconnect / refresh — only when connected
         if (disconnectButton != null) disconnectButton.gameObject.SetActive(isConnected);
         if (refreshButton != null)    refreshButton.gameObject.SetActive(isConnected);
 
-        // Continue button — ONLY when wallet is linked AND an NFT is active.
-        // This forces the mint flow for users without a Capmon, rather than
-        // letting them skip into manual mode with no Capbot.
         if (continueButton != null) continueButton.gameObject.SetActive(isConnected && hasNft);
 
         if (isConnected)
@@ -200,34 +151,23 @@ public class WalletScreen : MonoBehaviour
         if (!isConnected) SetStatus("");
     }
 
-    /// <summary>
-    /// Slide the no-NFT text panel in from the left, then reveal the
-    /// "Get Capmon NFT" button after the slide completes.
-    /// Called only when transitioning INTO the connected-no-NFT state.
-    /// </summary>
     private void PlayNoNftSlideIn()
     {
         if (panelConnectedNoNft == null) return;
         var rt = panelConnectedNoNft.GetComponent<RectTransform>();
         if (rt == null) return;
 
-        // Cache the panel's home position the first time we see it, so subsequent
-        // animations always slide back to the correct resting place even if a
-        // previous tween was interrupted mid-flight.
         if (!cachedNoNftPanelHomePos.HasValue)
         {
             cachedNoNftPanelHomePos = rt.anchoredPosition;
         }
         Vector2 home = cachedNoNftPanelHomePos.Value;
 
-        // Kill any in-flight tween + button tween to avoid stacked animations
         rt.DOKill();
         if (mintExternalButton != null) mintExternalButton.transform.DOKill();
 
-        // Hide button — animation will reveal it OnComplete
         if (mintExternalButton != null) mintExternalButton.gameObject.SetActive(false);
 
-        // Start off-screen left, slide to home over 0.5s
         rt.anchoredPosition = new Vector2(-1500f, home.y);
         rt.DOAnchorPos(home, 0.5f).SetEase(Ease.OutCubic).OnComplete(() =>
         {
@@ -256,10 +196,6 @@ public class WalletScreen : MonoBehaviour
         statusText.color = isError ? new Color(0.95f, 0.4f, 0.4f) : Color.white;
     }
 
-    /// <summary>
-    /// Clear status text after a brief delay so transient messages like
-    /// "Updated" don't compete with the persistent "Linked!" + tier badge UI.
-    /// </summary>
     private IEnumerator ClearStatusAfterDelay(float seconds)
     {
         yield return new WaitForSeconds(seconds);
@@ -299,8 +235,6 @@ public class WalletScreen : MonoBehaviour
             {
                 Debug.Log("✅ [WalletScreen] Connected: " + pubkey);
                 SetStatus("Verifying ownership...");
-                // Immediately link — single user-facing action ("Link Wallet")
-                // covers connect + sign-message + CF round-trip.
                 AttemptLink();
             },
             onError: err =>
@@ -319,7 +253,6 @@ public class WalletScreen : MonoBehaviour
             {
                 Debug.Log("✅ [WalletScreen] Link success: tier=" + result.stakedTier);
 
-                // Push stake state into PlayerData so resolveMatch + battle UI see it
                 if (FirebaseManager.Instance != null)
                 {
                     FirebaseManager.Instance.ApplyStakeStateFromLink(result);
@@ -336,16 +269,12 @@ public class WalletScreen : MonoBehaviour
 
                 RefreshUIFromCurrentState();
                 SetButtonsInteractable(true);
-
-                // Let the transient confirmation fade so the persistent UI
-                // ("Linked!" button + tier badge) becomes the visible signal.
                 StartClearStatusTimer();
             },
             onError: err =>
             {
                 Debug.LogError("❌ [WalletScreen] Link error: " + err);
                 SetStatus("Link failed: " + err, true);
-                // Even on link failure the wallet is connected; user can retry refresh
                 RefreshUIFromCurrentState();
                 SetButtonsInteractable(true);
             }
@@ -365,9 +294,6 @@ public class WalletScreen : MonoBehaviour
         SetButtonsInteractable(false);
         SetStatus("Refreshing stake state...");
 
-        // Re-runs sign-message + CF call. Phantom popup will appear again — that's
-        // intentional, every linkWallet call is a fresh ownership proof, prevents
-        // stale CF responses from being trusted across long-lived sessions.
         WalletManager.Instance.RefreshStakeState(
             onSuccess: result =>
             {
@@ -379,9 +305,6 @@ public class WalletScreen : MonoBehaviour
                 SetStatus(result.stakedTier >= 0 ? "Updated" : "No staked NFT found");
                 RefreshUIFromCurrentState();
                 SetButtonsInteractable(true);
-
-                // After "Updated" briefly displays, clear it so the linked UI
-                // (button reads "Linked!" + tier badge) is the persistent signal.
                 StartClearStatusTimer();
             },
             onError: err =>
@@ -404,8 +327,6 @@ public class WalletScreen : MonoBehaviour
 
         WalletManager.Instance.DisconnectWallet(() =>
         {
-            // Clear stake state on the player too — losing the wallet means
-            // resolveMatch reverts to base 1.0× multiplier on next battle.
             if (FirebaseManager.Instance != null && FirebaseManager.Instance.currentPlayer != null)
             {
                 FirebaseManager.Instance.currentPlayer.solanaWalletAddress = null;
@@ -426,34 +347,50 @@ public class WalletScreen : MonoBehaviour
         Application.OpenURL(MINT_URL);
     }
 
-    /// <summary>
-    /// "Continue" — only reachable when wallet is linked AND an NFT is active
-    /// (button is hidden otherwise). Advances to StarterSelectionScreen.
-    /// </summary>
     private void OnContinueButton()
     {
-        Debug.Log("=== [WalletScreen] Continue pressed — advancing to StarterSelection ===");
-        gameObject.SetActive(false);
+        Debug.Log("=== [WalletScreen] Continue pressed — transitioning to StarterSelection ===");
 
-        if (starterSelectionScreen != null)
+        if (starterSelectionScreen == null)
         {
-            Debug.Log("=== [WalletScreen] SUCCESS: Activating StarterSelectionScreen ===");
-            starterSelectionScreen.SetActive(true);
+            Debug.LogError("=== [WalletScreen] CRITICAL: starterSelectionScreen reference missing! ===");
+            return;
         }
+
+        TransitionTo(starterSelectionScreen);
+    }
+
+    /// <summary>
+    /// Back button — returns to LoginScreen. Wallet stays connected in WalletManager;
+    /// disconnect requires the explicit Disconnect button so users don't lose state by accident.
+    /// </summary>
+    private void OnBackButton()
+    {
+        Debug.Log("=== [WalletScreen] Back pressed — returning to LoginScreen ===");
+
+        if (loginScreen == null)
+        {
+            Debug.LogError("=== [WalletScreen] CRITICAL: loginScreen reference missing! ===");
+            return;
+        }
+
+        TransitionTo(loginScreen);
+    }
+
+    private void TransitionTo(GameObject target)
+    {
+        var sm = ScreenTransitionManager.Instance;
+        if (sm != null) sm.GoTo(gameObject, target);
         else
         {
-            Debug.LogError("=== [WalletScreen] CRITICAL: starterSelectionScreen reference missing in Inspector! ===");
+            gameObject.SetActive(false);
+            target.SetActive(true);
         }
     }
 
     private void SetButtonsInteractable(bool interactable)
     {
-        // Connect button interactability is governed by RefreshUIFromCurrentState
-        // (locked off when already linked). Skip it here so we don't accidentally
-        // re-enable it after a successful link.
         if (refreshButton != null)    refreshButton.interactable    = interactable;
         if (disconnectButton != null) disconnectButton.interactable = interactable;
-        // continueButton stays interactable when visible — user must always be able
-        // to advance once linked, even if a refresh is mid-flight.
     }
 }
